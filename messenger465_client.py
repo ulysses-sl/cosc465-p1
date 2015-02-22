@@ -22,26 +22,67 @@ class MessageBoardNetwork(object):
     respective methods, below) and return the message or
     response data back to the MessageBoardController class.
     '''
-    def __init__(self, host, port):
+    def __init__(self, host, port, retries, timeout):
         '''
         Constructor.  You should create a new socket
         here and do any other initialization.
         '''
-        pass
+        self.address = (host, port)
+        self.socket = socket.socket(type=socket.SOCK_DGRAM)
+        self.retries = retries
+        self.timeout = timeout
+        self.get = "GET"
+        self.post = "POST {}::{}"
+        self.seq = b'0'
+
+    def nextSeq(self):
+        if self.seq == b'0':
+            self.seq = b'1'
+        else:
+            self.seq = b'0'
+
+    def generateHeader(self, databytes):
+        seq = self.seq
+        checksum = 0
+        for b in databytes:
+            checksum ^= b
+        return b'C' + seq + bytes([checksum])
+
+    def generateRequest(self, data):
+        databytes = data.encode()
+        header = self.generateHeader(databytes)
+        return header + databytes
+
+    def sendRequest(self, request):
+        """DRY!"""
+        for t in range(self.retries):
+            self.socket.sendto(request, self.address)
+            availableSocket = select([self.socket], [], [], self.timeout)[0]
+            if availableSocket:
+                s = availableSocket[0]
+                msg = s.recvfrom(1400)[0].decode()
+                if msg[1] == self.seq.decode():
+                    self.nextSeq()
+                    return msg[3:]
+        return "ERROR server does not respond"
 
     def getMessages(self):
         '''
         You should make calls to get messages from the message 
         board server here.
         '''
-        pass
+        data = self.get
+        request = self.generateRequest(data)
+        return self.sendRequest(request)
 
     def postMessage(self, user, message):
         '''
         You should make calls to post messages to the message 
         board server here.
         '''
-        pass
+        data = self.post.format(user, message)
+        request = self.generateRequest(data)
+        return self.sendRequest(request)
 
 
 class MessageBoardController(object):
@@ -51,11 +92,11 @@ class MessageBoardController(object):
     to/from the server via the MessageBoardNetwork class.
     '''
 
-    def __init__(self, myname, host, port):
+    def __init__(self, myname, host, port, retries, timeout):
         self.name = myname
         self.view = MessageBoardView(myname)
         self.view.setMessageCallback(self.post_message_callback)
-        self.net = MessageBoardNetwork(host, port)
+        self.net = MessageBoardNetwork(host, port, retries, timeout)
 
     def run(self):
         self.view.after(1000, self.retrieve_messages)
@@ -68,7 +109,21 @@ class MessageBoardController(object):
         the message to the MessageBoardNetwork class via the
         postMessage method.
         '''
-        pass
+        result = self.net.postMessage(self.name, m)
+        if result.startswith("OK"):
+            # sometimes, right after server is unresponsive,
+            # the server would send the entire message list
+            # instead of simple OK sign.
+            self.view.setStatus("Message Sent")
+        else:
+            self.view.setStatus(result)
+
+    def split_messages(self, raw_data):
+        m = raw_data[3:].split("::")
+        messages = []
+        for i in range(0, len(m), 3):
+            messages.append(" ".join(m[i:i+3]))
+        return messages
 
     def retrieve_messages(self):
         '''
@@ -89,6 +144,14 @@ class MessageBoardController(object):
         '''
         self.view.after(1000, self.retrieve_messages)
         messagedata = self.net.getMessages()
+        print(messagedata)
+        if messagedata.startswith("OK"):
+            messages = self.split_messages(messagedata)
+            self.view.setListItems(messages)
+            status = "{} messages retrieved".format(len(messages))
+            self.view.setStatus(status)
+        else:
+            self.view.setStatus(messagedata)
 
 
 class MessageBoardView(tkinter.Frame):
@@ -167,10 +230,14 @@ if __name__ == '__main__':
                         help='Set the host name for server to send requests to (default: localhost)')
     parser.add_argument('--port', dest='port', type=int, default=1111,
                         help='Set the port number for the server (default: 1111)')
+    parser.add_argument("--retries", dest='retries', type=int, default=3,
+                        help='Set the number of retransmissions in case of a timeout')
+    parser.add_argument("--timeout", dest='timeout', type=float, default=0.1,
+                        help='Set the RTO value')
     args = parser.parse_args()
 
     myname = input("What is your user name (max 8 characters)? ")
 
-    app = MessageBoardController(myname, args.host, args.port)
+    app = MessageBoardController(myname, args.host, args.port, args.retries, args.timeout)
     app.run()
 
